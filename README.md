@@ -141,7 +141,7 @@ Key cleaning steps: header assignment, type casting, dedup on natural key (handl
 | Name | Role |
 |---|---|
 | Abdullah Saeed (24L-2529) | Pipeline Engineering |
-| Arqam Umais (24L-2591) | Data Modeling & BI |
+| Arqum Umais (24L-2591) | Data Modeling & BI |
 
 ---
 
