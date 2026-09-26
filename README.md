@@ -147,4 +147,4 @@ Key cleaning steps: header assignment, type casting, dedup on natural key (handl
 
 ## 📄 License
 
-This project is for academic purposes as part of a Big Data / Data Engineering semester course. Source data © [Binance](https://www.binance.com/), published via [Binance Vision](https://data.binance.vision) for public research and analytical use.
+This project is for academic purposes as part of a "Data Analysis and Visualizasion" semester course. Source data © [Binance](https://www.binance.com/), published via [Binance Vision](https://data.binance.vision) for public research and analytical use.
