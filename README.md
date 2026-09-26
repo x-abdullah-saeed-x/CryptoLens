@@ -140,8 +140,8 @@ Key cleaning steps: header assignment, type casting, dedup on natural key (handl
 
 | Name | Role |
 |---|---|
-| Abdullah Saeed | Pipeline Engineering |
-| Arqam Umais | Data Modeling & BI |
+| Abdullah Saeed (24L-2529) | Pipeline Engineering |
+| Arqam Umais (24L-2591) | Data Modeling & BI |
 
 ---
 
