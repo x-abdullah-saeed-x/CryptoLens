@@ -1,4 +1,4 @@
-# CryptoVision 🕯️📊
+# CryptoLens 🕯️📊
 ### A Medallion Architecture Lakehouse for Crypto Market Data (Binance Vision Klines)
 
 [![Spark](https://img.shields.io/badge/Apache%20Spark-Databricks-orange)](https://spark.apache.org/)
@@ -19,10 +19,10 @@
 | **Dataset** | Spot Klines (1-hour candles) for `BTCUSDT`, `ETHUSDT`, `BNBUSDT`, `SOLUSDT`, `XRPUSDT` |
 | **Platform** | Databricks Community Edition (Apache Spark + Delta Lake) |
 | **BI Tool** | Power BI |
-| **Team** | *[Student Name 1]* & *[Student Name 2]* |
+| **Team** | Abdullah Saeed & Arqam Umais |
 | **Course** | Big Data / Data Engineering — Semester Project |
 
-CryptoVision tracks price action and trading activity across a fixed basket of Binance spot pairs so analysts can study volatility, trend, and cross-asset correlation — the kind of daily-cadence analysis a trading desk or research team relies on, built to stay well within free-tier Spark compute and storage limits.
+CryptoLens tracks price action and trading activity across a fixed basket of Binance spot pairs so analysts can study volatility, trend, and cross-asset correlation — the kind of daily-cadence analysis a trading desk or research team relies on, built to stay well within free-tier Spark compute and storage limits.
 
 ---
 
@@ -50,7 +50,7 @@ flowchart LR
 ## 📂 Repository Structure
 
 ```
-cryptovision/
+cryptolens/
 ├── samples/              # Sample raw payloads (Full Load + Incremental Load)
 │   ├── BTCUSDT-1h-2026-08-SAMPLE.csv
 │   ├── BTCUSDT-1h-2026-09-25.csv
@@ -140,8 +140,8 @@ Key cleaning steps: header assignment, type casting, dedup on natural key (handl
 
 | Name | Role |
 |---|---|
-| *[Student Name 1]* | *[e.g. Pipeline Engineering]* |
-| *[Student Name 2]* | *[e.g. Data Modeling & BI]* |
+| Abdullah Saeed | Pipeline Engineering |
+| Arqam Umais | Data Modeling & BI |
 
 ---
 
