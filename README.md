@@ -60,7 +60,7 @@ cryptolens/
 ├── notebooks/               # Databricks notebooks, one per Medallion layer
 │   └── 01_bronze_ingest.ipynb
 ├── .gitignore               # excludes bulk full_load/ and incremental_load/ data
-└── README.md                # You are here
+└── README.md               
 ```
 
 **Coming this phase:**
