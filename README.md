@@ -55,21 +55,27 @@ flowchart LR
 
 ```
 cryptolens/
-├── docs/                              # Proposals, data dictionary, phase deliverables
+├── docs/                                       # Proposals, data dictionary, phase deliverables
 │   ├── Phase1_Project_Proposal_Crypto_Pipeline.docx
-│   ├── CryptoLens_Phase2_Document.docx
+│   ├── Phase2_CryptoLens.pdf
 │   └── CryptoLens_Data_Dictionary.pdf
-├── notebooks/                         # Databricks notebooks, one per Medallion layer
-│   ├── 01_bronze_ingest.ipynb
-│   └── 02_silver_transform.ipynb
-├── .gitignore                         # excludes bulk full_load/ and incremental_load/ data
+├── notebooks/                                  # One notebook per pipeline stage
+│   ├── 00_layers_verification.ipynb            # Validation: counts, idempotency, audit-log checks
+│   ├── 01.1_bronze_ingest_data extractor.ipynb # Local-machine download + SHA256 verification
+│   ├── 01.2_bronze_ingest.ipynb                # Databricks: Raw -> Bronze
+│   └── 02_silver_transform.ipynb               # Databricks: Bronze -> Silver
+├── .gitignore                                  # excludes bulk full_load/ and incremental_load/ data
 └── README.md
 ```
 
+**Notebook roles:**
+- `01.1_bronze_ingest_data extractor` runs **locally** (not in Databricks): downloads monthly/daily kline ZIPs, verifies each SHA256 checksum, and extracts CSVs ready for upload to the Volume.
+- `01.2_bronze_ingest` and `02_silver_transform` run in Databricks Serverless and implement the Raw → Bronze and Bronze → Silver stages.
+- `00_layers_verification` is a read-only validation notebook: table existence, per-layer row/symbol counts, idempotency re-run check, audit-log review, quarantine and quality-filter counts.
+
 **Coming next (Phase 3):**
-- `samples/` — one real, checksum-verified symbol (`BTCUSDT`, monthly + daily) with a schema README
-- `scripts/` — local-machine helpers (`binance_bronze_ingest.py`, `prepare_samples.py`) — run outside Databricks due to the network restriction above
 - `notebooks/03_gold_aggregate.ipynb`
+- `samples/` — one real, checksum-verified symbol (`BTCUSDT`, monthly + daily) with a schema README
 - `dashboards/` — exported Power BI `.pbix` file
 
 The bulk 50-symbol working dataset (`full_load/`, `incremental_load/`) is intentionally **not** committed to git — it's excluded via `.gitignore` and instead lives in the Databricks Unity Catalog Volume (`workspace.cryptolens.bronze_raw`), keeping the repository lean while the real analytical dataset still meets the required size thresholds.
@@ -80,13 +86,13 @@ The bulk 50-symbol working dataset (`full_load/`, `incremental_load/`) is intent
 
 Full column-level definitions, types, and keys are in **[`docs/CryptoLens_Data_Dictionary.pdf`](docs/CryptoLens_Data_Dictionary.pdf)**. Summary:
 
-### Bronze (`01_bronze_ingest.ipynb`)
+### Bronze (`01.2_bronze_ingest.ipynb`)
 - **`bronze_klines`** — raw kline rows, explicit schema (`StructType`, no `inferSchema`), tagged with `symbol`, `interval`, `load_type`, `source_file`, `load_timestamp`. Idempotent `MERGE` on `(symbol, interval, load_type, open_time)`.
 - **`bronze_exchange_info`** — raw `/exchangeInfo` JSON snapshots, one per run, feeding `dim_symbol`.
 - **`bronze_quarantine`** — rows that fail schema-on-read (PERMISSIVE mode + `_corrupt_record`) are routed here instead of crashing the batch.
 
 ### Silver (`02_silver_transform.ipynb`)
-- **`silver_klines`** — one row per `(symbol, interval, open_time)`. Casts epoch-ms longs to `TIMESTAMP`, OHLCV to `DECIMAL(18,8)`. Idempotent `MERGE` (`WHEN MATCHED THEN UPDATE` / `WHEN NOT MATCHED THEN INSERT`) handles both re-runs and a full-load file later correcting an incremental-load value. Quality rules drop rows where `high < low` or `close`/`open` fall outside `[low, high]`.
+- **`silver_klines`** — one row per `(symbol, interval, open_time)`. Casts epoch-ms longs to `TIMESTAMP`, price columns (`open`/`high`/`low`/`close`) to `DECIMAL(18,8)`, and volume columns (`volume`, `quote_asset_volume`, `taker_buy_*_vol`) to the wider `DECIMAL(28,8)` — high-supply symbols can trade volumes that overflow `DECIMAL(18,8)`. Idempotent `MERGE` (`WHEN MATCHED THEN UPDATE` / `WHEN NOT MATCHED THEN INSERT`) handles both re-runs and a full-load file later correcting an incremental-load value. Quality rules drop rows where `high < low` or `close`/`open` fall outside `[low, high]`.
 - **`dim_symbol`** — maintained with a real three-branch `MERGE`: `UPDATE` on status/filter change, `INSERT` for new listings, soft-delete (`is_active = false`) for delistings — history is preserved, never hard-deleted.
 
 ### Audit (both layers)
@@ -101,11 +107,12 @@ Full column-level definitions, types, and keys are in **[`docs/CryptoLens_Data_D
 
 - **Strict schema-on-read** — every CSV/JSON read uses an explicit `StructType`; `inferSchema` is never used.
 - **Idempotency** — every write path uses Delta `MERGE INTO`; re-running either notebook with identical parameters produces zero duplicate rows (verified by re-running twice and comparing row counts).
-- **Parameterized backfills** — both notebooks expose `symbol`/`interval`/`load_type`/`year`/`month`/`day` as Databricks widgets; no function hardcodes "today," so any historical batch can be reprocessed on demand.
+- **Parameterized backfills** — Bronze exposes `interval`/`load_type`/`year`/`month`/`day` as Databricks widgets and Silver exposes `interval`/`load_type`; no function hardcodes "today," so any historical batch can be reprocessed on demand. Symbols are auto-discovered (from files in the Volume for Bronze, from `bronze_klines` for Silver) rather than typed in, so there is no manual list to drift out of sync.
 - **Schema drift handling** — PERMISSIVE CSV mode routes unparseable rows to `bronze_quarantine` rather than failing the batch; Delta writes use `mergeSchema=true` to tolerate newly-added columns.
+- **Serverless-compatible code** — no RDD APIs (including `DataFrame.isEmpty()`, which wraps `.rdd` internally); emptiness checks use `limit(1).count()`.
 - **Audit logging** — every file/batch processed, across both Full and Incremental loads and both layers, writes a row to `pipeline_execution_logs`.
 
-Full writeup: **[`docs/CryptoLens_Phase2_Document.docx`](docs/CryptoLens_Phase2_Document.docx)**.
+Full writeup: **[`docs/Phase2_CryptoLens.pdf`](docs/Phase2_CryptoLens.pdf)** (includes a log of issues hit on Serverless and how each was resolved).
 
 ---
 
@@ -146,7 +153,7 @@ Full writeup: **[`docs/CryptoLens_Phase2_Document.docx`](docs/CryptoLens_Phase2_
 ## 🗓️ Roadmap
 
 - [x] **Phase 1** — Proposal, real checksum-verified sample data, architecture design, network-workaround documented *(26 Sep 2026)*
-- [x] **Phase 2** — Bronze & Silver notebooks implemented: explicit schemas, idempotent MERGE, parameterized backfills, schema-drift quarantine, audit logging *(10 Oct 2026)*
+- [x] **Phase 2** — Bronze & Silver notebooks implemented: explicit schemas, idempotent MERGE, parameterized backfills, schema-drift quarantine, audit logging *(completed; verified via `00_layers_verification.ipynb`)*
 - [ ] **Phase 3** — Gold layer, Power BI dashboard, final delivery *(due 24 Oct 2026)*
 
 ---
