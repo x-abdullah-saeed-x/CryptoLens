@@ -61,9 +61,9 @@ erDiagram
     volatility_daily {
         bigint symbol_key PK
         int date_key PK
-        double daily_return
+        decimal daily_return
         double log_return
-        double intraday_range_pct
+        decimal intraday_range_pct
         double rolling_vol
         double rolling_vol_annualized
     }
@@ -141,9 +141,9 @@ Relationships are all **one-to-many**: one dimension row to many fact rows. Ever
 | Column | Type | Description |
 |---|---|---|
 | `symbol_key`, `date_key` | | Keys |
-| `daily_return` | double | `close / previous close - 1` |
+| `daily_return` | decimal | `close / previous close - 1` |
 | `log_return` | double | `ln(close / previous close)` |
-| `intraday_range_pct` | double | `(high - low) / open` |
+| `intraday_range_pct` | decimal | `(high - low) / open` |
 | `rolling_vol` | double | Std. deviation of log returns over `VOL_WINDOW` (7) days |
 | `rolling_vol_annualized` | double | `rolling_vol * sqrt(365)` |
 
@@ -195,3 +195,4 @@ Relationships are all **one-to-many**: one dimension row to many fact rows. Ever
 - **Short history.** Data covers Aug 1 to Aug 31 and Sep 25, 2026. Moving-average windows are 5 and 20 days instead of 50 and 200. Days between Aug 31 and Sep 25 are absent, so windows treat Sep 25 as the day after Aug 31.
 - **Surrogate keys** use a 64-bit hash of the symbol name. Collisions are possible in theory but not at this scale (765 symbols).
 - **`dim_symbol` name clash.** `workspace.cryptolens.dim_symbol` (built in Silver) is separate from `workspace.gold.dim_symbol`. Power BI should use the Gold one.
+- **Single `exchangeInfo` snapshot.** Status-change tracking (`previous_status`, `status_changed_date`) is implemented, but with one snapshot loaded every `status_changed_date` equals the snapshot date; no real status change has been observed yet.

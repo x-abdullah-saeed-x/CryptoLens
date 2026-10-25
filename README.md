@@ -30,7 +30,7 @@ CryptoLens tracks price action and trading activity across the 50 most actively 
 
 ```mermaid
 flowchart LR
-    A[Binance Vision<br/>data.binance.vision<br/>monthly + daily kline ZIPs] -->|Download + SHA256<br/>checksum verify| L(Local machine<br/>binance_bronze_ingest.py)
+    A[Binance Vision<br/>data.binance.vision<br/>monthly + daily kline ZIPs] -->|Download + SHA256<br/>checksum verify| L(Local machine<br/>01.1 extractor notebook)
     X[Binance REST API<br/>ticker/24hr + exchangeInfo] -->|Top-50 symbol ranking<br/>+ live symbol status| L
     L -->|databricks fs cp<br/>CLI upload| B(Bronze Layer<br/>Unity Catalog Volume + Delta<br/>explicit schema, MERGE-idempotent)
     B -->|Cast, dedupe, MERGE| C(Silver Layer<br/>silver_klines + dim_symbol)
@@ -51,7 +51,7 @@ flowchart LR
 - **Full Load** — one monthly 1-minute kline file per tracked symbol (~43,200 rows/symbol/month) across all 50 tracked pairs (~200 MB total).
 - **Incremental Load** — one daily 1-minute kline file per tracked symbol (~1,440 rows/symbol/day), refreshed on every pipeline run (~10 MB/day total).
 - **Checksum verification** — every downloaded ZIP is SHA256-hashed and compared against Binance's own `.CHECKSUM` sidecar file before being trusted and extracted.
-- **Network workaround** — confirmed via direct DNS resolution testing that Databricks Free Edition's serverless compute cannot resolve `api.binance.com` or `data.binance.vision` (while `pypi.org`/`github.com` resolve fine) — an environment-specific domain allowlist, not a full internet block. Downloading therefore runs on a local machine (`binance_bronze_ingest.py`), and verified files are pushed into the Bronze Unity Catalog Volume via the Databricks CLI (`databricks fs cp`).
+- **Network workaround** — confirmed via direct DNS resolution testing that Databricks Free Edition's serverless compute cannot resolve `api.binance.com` or `data.binance.vision` (while `pypi.org`/`github.com` resolve fine) — an environment-specific domain allowlist, not a full internet block. Downloading therefore runs on a local machine (`01.1_bronze_ingest_data extractor.ipynb`), and verified files are pushed into the Bronze Unity Catalog Volume via the Databricks CLI (`databricks fs cp`).
 - **`dim_symbol`** — Binance's `/exchangeInfo` endpoint is snapshotted and merged into `dim_symbol` in Silver, since trading-pair status, listings, and delistings genuinely change over time. This gives the pipeline a real `MERGE` (insert + update + soft-delete), instead of the append-only kline data alone.
 
 ---
@@ -59,20 +59,24 @@ flowchart LR
 ## 📂 Repository Structure
 
 ```
-cryptolens/
-├── docs/                                       # Proposals, data dictionary, phase deliverables
-│   ├── Phase1_Project_Proposal_Crypto_Pipeline.docx
+CryptoLens/
+├── docs/                                       # Proposals, data dictionaries, phase deliverables
+│   ├── Phase1_Project_Proposal_CryptoLens_Updated.pdf
 │   ├── Phase2_CryptoLens.pdf
 │   ├── CryptoLens_Data_Dictionary.pdf          # Bronze + Silver
-│   └── gold_data_dictionary.md                 # Gold: ER diagram, keys, grain, load strategy
+│   ├── gold_data_dictionary.md                 # Gold: ER diagram, keys, grain, load strategy
+│   ├── CryptoLens_Phase3_Report.pdf            # Final architecture, DAG & FinOps report
+│   └── CryptoLens_Phase3_Report.docx           # Editable source of the report
 ├── notebooks/                                  # One notebook per pipeline stage
 │   ├── 00_layers_verification.ipynb            # Validation: counts, idempotency, audit-log checks
 │   ├── 01.1_bronze_ingest_data extractor.ipynb # Local-machine download + SHA256 verification
 │   ├── 01.2_bronze_ingest.ipynb                # Databricks: Raw -> Bronze
 │   ├── 02_silver_transform.ipynb               # Databricks: Bronze -> Silver
-│   └── 03_gold_transform.ipynb                 # Databricks: Silver -> Gold (star schema)
-├── dashboards/
-│   └── CryptoLens_Dashboard.pbix               # Power BI report (4 pages)
+│   ├── 03_gold_transform.ipynb                 # Databricks: Silver -> Gold (star schema)
+│   └── exchange_info/
+│       └── exchangeInfo-2026-10-11.json        # exchangeInfo snapshot used for dim_symbol
+├── dashboard/
+│   └── gold_layer_visualization.pbix           # Power BI report (4 pages)
 ├── .gitignore                                  # excludes bulk full_load/ and incremental_load/ data
 └── README.md
 ```
@@ -82,10 +86,6 @@ cryptolens/
 - `01.2_bronze_ingest` and `02_silver_transform` run in Databricks Serverless and implement the Raw → Bronze and Bronze → Silver stages.
 - `03_gold_transform` runs in Databricks Serverless as the **last task** of the `cryptolens_daily` Job: it rolls the 1-minute Silver candles up to daily facts, derives volatility / moving-average / correlation tables, optimises them, and logs every step.
 - `00_layers_verification` is a read-only validation notebook: table existence, per-layer row/symbol counts, idempotency re-run check, audit-log review, quarantine and quality-filter counts.
-
-**Still to add before final submission:**
-- `samples/` — one real, checksum-verified symbol (`BTCUSDT`, monthly + daily) with a schema README
-- `docs/` — the final Phase 3 architecture & FinOps report (PDF)
 
 The bulk 50-symbol working dataset (`full_load/`, `incremental_load/`) is intentionally **not** committed to git — it's excluded via `.gitignore` and instead lives in the Databricks Unity Catalog Volume (`workspace.cryptolens.bronze_raw`), keeping the repository lean while the real analytical dataset still meets the required size thresholds.
 
@@ -372,7 +372,7 @@ Full writeup: **[`docs/Phase2_CryptoLens.pdf`](docs/Phase2_CryptoLens.pdf)** (in
 
 ## 📊 Dashboard (Power BI)
 
-The report (`dashboards/CryptoLens_Dashboard.pbix`) connects to the `workspace.gold` schema (plus `pipeline_execution_logs`) through the Power BI **Databricks connector** and a Serverless SQL warehouse, in **Import** mode. The model mirrors the star schema: every fact table is many-to-one to `dim_symbol` and `dim_date`; the audit table stands alone.
+The report (`dashboard/gold_layer_visualization.pbix`) connects to the `workspace.gold` schema (plus `pipeline_execution_logs`) through the Power BI **Databricks connector** and a Serverless SQL warehouse, in **Import** mode. The model mirrors the star schema: every fact table is many-to-one to `dim_symbol` and `dim_date`; the audit table stands alone.
 
 | Page | Visuals | Business question answered |
 |---|---|---|
