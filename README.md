@@ -65,8 +65,7 @@ CryptoLens/
 │   ├── Phase2_CryptoLens.pdf
 │   ├── CryptoLens_Data_Dictionary.pdf          # Bronze + Silver
 │   ├── gold_data_dictionary.md                 # Gold: ER diagram, keys, grain, load strategy
-│   ├── CryptoLens_Phase3_Report.pdf            # Final architecture, DAG & FinOps report
-│   └── CryptoLens_Phase3_Report.docx           # Editable source of the report
+│   └── CryptoLens_Phase3_Report.pdf            # Final architecture, DAG & FinOps report
 ├── notebooks/                                  # One notebook per pipeline stage
 │   ├── 00_layers_verification.ipynb            # Validation: counts, idempotency, audit-log checks
 │   ├── 01.1_bronze_ingest_data extractor.ipynb # Local-machine download + SHA256 verification
