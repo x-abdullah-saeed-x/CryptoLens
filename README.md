@@ -104,7 +104,7 @@ Full column-level definitions, types, and keys are in **[`docs/CryptoLens_Data_D
 - **`silver_klines`** — one row per `(symbol, interval, open_time)`. Casts epoch-ms longs to `TIMESTAMP`, price columns (`open`/`high`/`low`/`close`) to `DECIMAL(18,8)`, and volume columns (`volume`, `quote_asset_volume`, `taker_buy_*_vol`) to the wider `DECIMAL(28,8)` — high-supply symbols can trade volumes that overflow `DECIMAL(18,8)`. Idempotent `MERGE` (`WHEN MATCHED THEN UPDATE` / `WHEN NOT MATCHED THEN INSERT`) handles both re-runs and a full-load file later correcting an incremental-load value. Quality rules drop rows where `high < low` or `close`/`open` fall outside `[low, high]`.
 - **`dim_symbol`** — maintained with a real three-branch `MERGE`: `UPDATE` on status/filter change, `INSERT` for new listings, soft-delete (`is_active = false`) for delistings — history is preserved, never hard-deleted.
 
-### Audit (both layers)
+### Audit (all layers)
 - **`pipeline_execution_logs`** — one row per file/batch processed at every layer, every run: `layer`, `parameter_processed`, `load_type`, `start_time`/`end_time`, `status` (`SUCCESS`/`FAILURE`/`SKIPPED`), `rows_inserted`, `rows_updated`, `error_message`.
 
 ### Gold (`03_gold_transform.ipynb`) — star schema in `workspace.gold`
@@ -124,6 +124,214 @@ Full column definitions and the ER diagram are in **[`docs/gold_data_dictionary.
 - **Relationships:** every fact table is many-to-one to `dim_symbol` and `dim_date` (eight active relationships in the Power BI model).
 - **Read optimisation:** `OPTIMIZE … ZORDER BY (symbol_key, date_key)` runs after every load on the four fact tables (`symbol_a_key, date_key` for the correlation table).
 - **Audit:** every Gold step writes to `pipeline_execution_logs` with `layer = 'Silver-to-Gold'`, including start/end time, source rows read, and rows inserted / updated (taken from Delta commit metrics for `MERGE` steps).
+
+---
+
+## 📐 Schema Reference
+
+Column-level schemas for every table, extracted from the notebooks. Bronze and Silver tables live in `workspace.cryptolens`; Gold tables live in `workspace.gold`. Types for Bronze/Silver come from the explicit `StructType` / `cast` calls; types for Gold derived columns are what Spark produces from the transformation expressions (confirm with `DESCRIBE TABLE` if exact precision matters).
+
+### 🥉 Bronze (`workspace.cryptolens`)
+
+#### `bronze_klines`
+Merge key: `(symbol, interval, load_type, open_time)` — insert-only on match.
+
+| Column | Type | Description |
+|---|---|---|
+| `open_time` | `BIGINT` | Candle open, raw epoch (see *Known limitations* on ms vs µs) |
+| `open` | `DOUBLE` | Open price |
+| `high` | `DOUBLE` | High price |
+| `low` | `DOUBLE` | Low price |
+| `close` | `DOUBLE` | Close price |
+| `volume` | `DOUBLE` | Base-asset volume |
+| `close_time` | `BIGINT` | Candle close, raw epoch |
+| `quote_asset_volume` | `DOUBLE` | Quote-asset (USDT) volume |
+| `number_of_trades` | `BIGINT` | Trades in the candle |
+| `taker_buy_base_asset_volume` | `DOUBLE` | Taker-buy base volume |
+| `taker_buy_quote_asset_volume` | `DOUBLE` | Taker-buy quote volume |
+| `ignore` | `STRING` | Unused Binance field |
+| `symbol` | `STRING` | Trading pair, e.g. `BTCUSDT` (from filename) |
+| `interval` | `STRING` | Candle interval, e.g. `1m` |
+| `load_type` | `STRING` | `full` or `incremental` |
+| `source_file` | `STRING` | Volume path of the source CSV |
+| `ingestion_date` | `DATE` | Date the row was ingested |
+| `load_timestamp` | `TIMESTAMP` | Ingestion timestamp |
+
+#### `bronze_quarantine`
+Rows that fail schema-on-read (PERMISSIVE mode). Same 12 raw columns as `bronze_klines` (as parsed), plus:
+
+| Column | Type | Description |
+|---|---|---|
+| `_corrupt_record` | `STRING` | Original unparseable line |
+| `source_file` | `STRING` | Volume path of the source CSV |
+| `load_timestamp` | `TIMESTAMP` | Quarantine timestamp |
+
+Written with `mergeSchema=true`, so columns may be added over time.
+
+#### `bronze_exchange_info`
+One row per `/exchangeInfo` snapshot, landed as raw JSON. Skipped if `source_file` already exists (idempotent).
+
+| Column | Type | Description |
+|---|---|---|
+| `raw_json` | `STRING` | Entire snapshot file as one string |
+| `source_file` | `STRING` | Volume path of the snapshot |
+| `load_timestamp` | `TIMESTAMP` | Landing timestamp |
+
+### 🥈 Silver (`workspace.cryptolens`)
+
+#### `silver_klines`
+Merge key: `(symbol, interval, open_time)`. Matched rows are updated only if a business value changed. `load_type` and the `ignore` column are dropped in Silver.
+
+| Column | Type | Description |
+|---|---|---|
+| `symbol` | `STRING` | Trading pair |
+| `interval` | `STRING` | Candle interval |
+| `open_time` | `TIMESTAMP` | Candle open (raw value / 1000) |
+| `close_time` | `TIMESTAMP` | Candle close (raw value / 1000) |
+| `open` | `DECIMAL(18,8)` | Open price |
+| `high` | `DECIMAL(18,8)` | High price |
+| `low` | `DECIMAL(18,8)` | Low price |
+| `close` | `DECIMAL(18,8)` | Close price |
+| `volume` | `DECIMAL(28,8)` | Base-asset volume |
+| `quote_asset_volume` | `DECIMAL(28,8)` | Quote-asset (USDT) volume |
+| `number_of_trades` | `INT` | Trades in the candle |
+| `taker_buy_base_vol` | `DECIMAL(28,8)` | Taker-buy base volume (renamed from Bronze) |
+| `taker_buy_quote_vol` | `DECIMAL(28,8)` | Taker-buy quote volume (renamed from Bronze) |
+| `load_timestamp` | `TIMESTAMP` | Silver load timestamp |
+
+Quality filters: `high >= low`, `close` and `open` within `[low, high]`, de-duplicated on the merge key.
+
+#### `dim_symbol` (Silver)
+Three-branch `MERGE` on `symbol`: update on status/filter change, insert new listings, soft-delete (`is_active = false`, `status = 'DELISTED'`) for symbols missing from the latest snapshot.
+
+| Column | Type | Description |
+|---|---|---|
+| `symbol` | `STRING` | Trading pair (merge key) |
+| `base_asset` | `STRING` | Base asset, e.g. `BTC` |
+| `quote_asset` | `STRING` | Quote asset, e.g. `USDT` |
+| `status` | `STRING` | Binance trading status (`TRADING`, `BREAK`, `DELISTED`, …) |
+| `is_spot_trading_allowed` | `BOOLEAN` | Spot trading flag from `exchangeInfo` |
+| `load_timestamp` | `TIMESTAMP` | Last change timestamp |
+| `is_active` | `BOOLEAN` | `false` once the symbol is soft-deleted |
+
+### 🧾 Audit (`workspace.cryptolens.pipeline_execution_logs`)
+
+Shared by all three layers. `layer` is `Raw-to-Bronze`, `Bronze-to-Silver`, or `Silver-to-Gold`.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `run_id` | `STRING` | no | UUID per log row |
+| `layer` | `STRING` | no | Pipeline stage |
+| `parameter_processed` | `STRING` | no | File path, `symbol-interval-loadtype`, or `table [operation] source_rows=N` |
+| `load_type` | `STRING` | no | `full`, `incremental`, or `snapshot` |
+| `start_time` | `TIMESTAMP` | no | Step start |
+| `end_time` | `TIMESTAMP` | no | Step end |
+| `status` | `STRING` | no | `SUCCESS`, `FAILURE`, or `SKIPPED` |
+| `rows_inserted` | `BIGINT` | yes | Rows inserted (from Delta commit metrics on `MERGE`) |
+| `rows_updated` | `BIGINT` | yes | Rows updated |
+| `error_message` | `STRING` | yes | Error text (truncated to 500 chars in Gold) |
+
+### 🥇 Gold (`workspace.gold`)
+
+`symbol_key = abs(xxhash64(symbol))` and `date_key` (`yyyyMMdd`) are identical in every table.
+
+#### `dim_symbol` (Gold) — key: `symbol_key`
+USDT pairs only (`quoteAsset = 'USDT'`).
+
+| Column | Type | Description |
+|---|---|---|
+| `symbol_key` | `BIGINT` | Surrogate key |
+| `symbol` | `STRING` | Trading pair |
+| `base_asset` | `STRING` | Base asset |
+| `quote_asset` | `STRING` | Quote asset (always `USDT`) |
+| `status` | `STRING` | Current status; `DELISTED` if missing from latest snapshot |
+| `is_spot_trading_allowed` | `BOOLEAN` | Spot trading flag |
+| `previous_status` | `STRING` | Status before the last change (null if never changed) |
+| `status_changed_date` | `DATE` | Date of the last status change |
+| `first_seen_date` | `DATE` | First snapshot containing the pair |
+| `last_seen_date` | `DATE` | Latest snapshot containing the pair |
+
+#### `dim_date` — key: `date_key`
+
+| Column | Type | Description |
+|---|---|---|
+| `date_key` | `INT` | `yyyyMMdd` |
+| `full_date` | `DATE` | Calendar date |
+| `year` | `INT` | Year |
+| `quarter` | `INT` | Quarter (1–4) |
+| `month` | `INT` | Month number |
+| `month_name` | `STRING` | e.g. `August` |
+| `day` | `INT` | Day of month |
+| `day_of_week` | `INT` | 1 = Sunday … 7 = Saturday |
+| `day_name` | `STRING` | e.g. `Monday` |
+| `week_of_year` | `INT` | Week number |
+| `is_weekend` | `BOOLEAN` | Saturday or Sunday |
+
+#### `fact_daily_ohlcv` — key: `(symbol_key, date_key)`
+Daily roll-up of 1-minute Silver candles.
+
+| Column | Type | Description |
+|---|---|---|
+| `symbol_key` | `BIGINT` | FK → `dim_symbol` |
+| `date_key` | `INT` | FK → `dim_date` |
+| `symbol` | `STRING` | Trading pair |
+| `trade_date` | `DATE` | Trading day |
+| `open_price` | `DECIMAL(18,8)` | Open of the first candle of the day |
+| `high_price` | `DECIMAL(18,8)` | Highest high |
+| `low_price` | `DECIMAL(18,8)` | Lowest low |
+| `close_price` | `DECIMAL(18,8)` | Close of the last candle of the day |
+| `volume` | `DECIMAL(38,8)` | Sum of base-asset volume |
+| `quote_volume` | `DECIMAL(38,8)` | Sum of USDT volume |
+| `vwap` | `DECIMAL` | `quote_volume / volume` (`try_divide`, null when volume = 0) |
+| `trade_count` | `BIGINT` | Sum of trades |
+| `candle_count` | `BIGINT` | 1-minute candles in the day (max 1,440) |
+| `_loaded_at` | `TIMESTAMP` | Gold load timestamp |
+
+#### `volatility_daily` — key: `(symbol_key, date_key)`
+
+| Column | Type | Description |
+|---|---|---|
+| `symbol_key` | `BIGINT` | FK → `dim_symbol` |
+| `date_key` | `INT` | FK → `dim_date` |
+| `symbol` | `STRING` | Trading pair |
+| `trade_date` | `DATE` | Trading day |
+| `close_price` | `DECIMAL(18,8)` | Daily close |
+| `daily_return` | `DECIMAL` | `close / prev_close − 1` |
+| `log_return` | `DOUBLE` | `ln(close / prev_close)` |
+| `intraday_range_pct` | `DECIMAL` | `(high − low) / open` |
+| `rolling_vol` | `DOUBLE` | Std. dev. of `log_return` over `VOL_WINDOW` (7) days |
+| `rolling_vol_annualized` | `DOUBLE` | `rolling_vol × √365` |
+
+#### `moving_averages` — key: `(symbol_key, date_key)`
+
+| Column | Type | Description |
+|---|---|---|
+| `symbol_key` | `BIGINT` | FK → `dim_symbol` |
+| `date_key` | `INT` | FK → `dim_date` |
+| `symbol` | `STRING` | Trading pair |
+| `trade_date` | `DATE` | Trading day |
+| `close_price` | `DECIMAL(18,8)` | Daily close |
+| `ma_short` | `DECIMAL(22,12)` | Short SMA (5-day), null until the window is full |
+| `ma_long` | `DECIMAL(22,12)` | Long SMA (20-day), null until the window is full |
+| `cross_signal` | `STRING` | `GOLDEN_CROSS`, `DEATH_CROSS`, or null |
+| `trend` | `STRING` | `BULLISH` (short > long), `BEARISH` (short < long), or null |
+| `ma_short_window` | `INT` | Short window length used |
+| `ma_long_window` | `INT` | Long window length used |
+
+#### `symbol_correlation` — key: `(symbol_a_key, symbol_b_key, date_key)`
+Top 15 symbols by total quote volume; pairs are ordered so `symbol_a < symbol_b`.
+
+| Column | Type | Description |
+|---|---|---|
+| `symbol_a_key` | `BIGINT` | FK → `dim_symbol` |
+| `symbol_b_key` | `BIGINT` | FK → `dim_symbol` |
+| `date_key` | `INT` | FK → `dim_date` |
+| `symbol_a` | `STRING` | First symbol |
+| `symbol_b` | `STRING` | Second symbol |
+| `trade_date` | `DATE` | Trading day |
+| `rolling_corr` | `DOUBLE` | Rolling 14-day correlation of daily log returns (−1 to 1) |
+
+> **Note:** `dim_symbol` exists in both schemas — `workspace.cryptolens.dim_symbol` (Silver, keyed on `symbol`, soft-delete via `is_active`) and `workspace.gold.dim_symbol` (star-schema dimension, keyed on `symbol_key`). Power BI uses the Gold one.
 
 ---
 
