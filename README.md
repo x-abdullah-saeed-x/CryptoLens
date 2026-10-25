@@ -3,7 +3,7 @@
 
 [![Spark](https://img.shields.io/badge/Apache%20Spark-Databricks-orange)](https://spark.apache.org/)
 [![Delta Lake](https://img.shields.io/badge/Delta%20Lake-Medallion%20Architecture-blue)](https://delta.io/)
-[![Status](https://img.shields.io/badge/status-Phase%202-brightgreen)]()
+[![Status](https://img.shields.io/badge/status-Phase%203-brightgreen)]()
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)]()
 
 > An end-to-end, automated data pipeline that ingests real historical and daily OHLCV (Open, High, Low, Close, Volume) candlestick data for the top 50 Binance USDT trading pairs, processes it through **Bronze → Silver → Gold** layers on Apache Spark / Delta Lake, and serves a Power BI dashboard for market analysts.
@@ -34,8 +34,13 @@ flowchart LR
     X[Binance REST API<br/>ticker/24hr + exchangeInfo] -->|Top-50 symbol ranking<br/>+ live symbol status| L
     L -->|databricks fs cp<br/>CLI upload| B(Bronze Layer<br/>Unity Catalog Volume + Delta<br/>explicit schema, MERGE-idempotent)
     B -->|Cast, dedupe, MERGE| C(Silver Layer<br/>silver_klines + dim_symbol)
-    C -->|Aggregate, model| D(Gold Layer<br/>Dimensional model — Phase 3)
-    D -->|Databricks connector| E[Power BI Dashboard — Phase 3]
+    C -->|Daily roll-up, indicators,<br/>MERGE + OPTIMIZE| D(Gold Layer<br/>Star schema: 2 dimensions + 4 facts)
+    D -->|Databricks connector<br/>SQL warehouse, Import mode| E[Power BI Dashboard<br/>4 pages]
+    J{{Databricks Job<br/>cryptolens_daily}} -.->|task 1| B
+    J -.->|task 2| C
+    J -.->|task 3| D
+    B & C & D -.->|one log row per step| G[(pipeline_execution_logs)]
+    G --> E
 
     style B fill:#cd7f32,color:#fff
     style C fill:#c0c0c0,color:#000
@@ -58,12 +63,16 @@ cryptolens/
 ├── docs/                                       # Proposals, data dictionary, phase deliverables
 │   ├── Phase1_Project_Proposal_Crypto_Pipeline.docx
 │   ├── Phase2_CryptoLens.pdf
-│   └── CryptoLens_Data_Dictionary.pdf
+│   ├── CryptoLens_Data_Dictionary.pdf          # Bronze + Silver
+│   └── gold_data_dictionary.md                 # Gold: ER diagram, keys, grain, load strategy
 ├── notebooks/                                  # One notebook per pipeline stage
 │   ├── 00_layers_verification.ipynb            # Validation: counts, idempotency, audit-log checks
 │   ├── 01.1_bronze_ingest_data extractor.ipynb # Local-machine download + SHA256 verification
 │   ├── 01.2_bronze_ingest.ipynb                # Databricks: Raw -> Bronze
-│   └── 02_silver_transform.ipynb               # Databricks: Bronze -> Silver
+│   ├── 02_silver_transform.ipynb               # Databricks: Bronze -> Silver
+│   └── 03_gold_transform.ipynb                 # Databricks: Silver -> Gold (star schema)
+├── dashboards/
+│   └── CryptoLens_Dashboard.pbix               # Power BI report (4 pages)
 ├── .gitignore                                  # excludes bulk full_load/ and incremental_load/ data
 └── README.md
 ```
@@ -71,12 +80,12 @@ cryptolens/
 **Notebook roles:**
 - `01.1_bronze_ingest_data extractor` runs **locally** (not in Databricks): downloads monthly/daily kline ZIPs, verifies each SHA256 checksum, and extracts CSVs ready for upload to the Volume.
 - `01.2_bronze_ingest` and `02_silver_transform` run in Databricks Serverless and implement the Raw → Bronze and Bronze → Silver stages.
+- `03_gold_transform` runs in Databricks Serverless as the **last task** of the `cryptolens_daily` Job: it rolls the 1-minute Silver candles up to daily facts, derives volatility / moving-average / correlation tables, optimises them, and logs every step.
 - `00_layers_verification` is a read-only validation notebook: table existence, per-layer row/symbol counts, idempotency re-run check, audit-log review, quarantine and quality-filter counts.
 
-**Coming next (Phase 3):**
-- `notebooks/03_gold_aggregate.ipynb`
+**Still to add before final submission:**
 - `samples/` — one real, checksum-verified symbol (`BTCUSDT`, monthly + daily) with a schema README
-- `dashboards/` — exported Power BI `.pbix` file
+- `docs/` — the final Phase 3 architecture & FinOps report (PDF)
 
 The bulk 50-symbol working dataset (`full_load/`, `incremental_load/`) is intentionally **not** committed to git — it's excluded via `.gitignore` and instead lives in the Databricks Unity Catalog Volume (`workspace.cryptolens.bronze_raw`), keeping the repository lean while the real analytical dataset still meets the required size thresholds.
 
@@ -98,8 +107,23 @@ Full column-level definitions, types, and keys are in **[`docs/CryptoLens_Data_D
 ### Audit (both layers)
 - **`pipeline_execution_logs`** — one row per file/batch processed at every layer, every run: `layer`, `parameter_processed`, `load_type`, `start_time`/`end_time`, `status` (`SUCCESS`/`FAILURE`/`SKIPPED`), `rows_inserted`, `rows_updated`, `error_message`.
 
-### Gold (Phase 3 — designed, not yet implemented)
-- `dim_symbol`, `dim_date`, `fact_daily_ohlcv` (rolled up from 1-minute Silver data), `gold.volatility_daily`, `gold.moving_averages`, `gold.symbol_correlation`.
+### Gold (`03_gold_transform.ipynb`) — star schema in `workspace.gold`
+
+Full column definitions and the ER diagram are in **[`docs/gold_data_dictionary.md`](docs/gold_data_dictionary.md)**.
+
+| Table | Type | Grain | Key | Load strategy |
+|---|---|---|---|---|
+| `dim_symbol` | Dimension | one USDT trading pair (all pairs in the `exchangeInfo` snapshot) | `symbol_key` | `MERGE`: status changes recorded (`previous_status`, `status_changed_date`); pairs missing from the latest snapshot marked `DELISTED` |
+| `dim_date` | Dimension | one calendar day | `date_key` (`yyyyMMdd`) | Overwrite (tiny, regenerated from the fact date range) |
+| `fact_daily_ohlcv` | Fact | symbol × day, rolled up from 1-minute Silver | `(symbol_key, date_key)` | `MERGE`, incremental (reprocesses the latest 2 days) |
+| `volatility_daily` | Derived fact | symbol × day | `(symbol_key, date_key)` | Overwrite from the fact table: daily / log returns, intraday range, 7-day rolling volatility (annualised) |
+| `moving_averages` | Derived fact | symbol × day | `(symbol_key, date_key)` | Overwrite: short / long SMA, `BULLISH` / `BEARISH` trend, `GOLDEN_CROSS` / `DEATH_CROSS` flags |
+| `symbol_correlation` | Derived fact | symbol pair × day | `(symbol_a_key, symbol_b_key, date_key)` | Overwrite: rolling 14-day correlation of daily log returns, top 15 symbols by quote volume |
+
+- **Keys:** `symbol_key = abs(xxhash64(symbol))`, identical in every table, so Power BI joins on a single integer column. `date_key` is an `int` in `yyyyMMdd` form.
+- **Relationships:** every fact table is many-to-one to `dim_symbol` and `dim_date` (eight active relationships in the Power BI model).
+- **Read optimisation:** `OPTIMIZE … ZORDER BY (symbol_key, date_key)` runs after every load on the four fact tables (`symbol_a_key, date_key` for the correlation table).
+- **Audit:** every Gold step writes to `pipeline_execution_logs` with `layer = 'Silver-to-Gold'`, including start/end time, source rows read, and rows inserted / updated (taken from Delta commit metrics for `MERGE` steps).
 
 ---
 
@@ -112,7 +136,23 @@ Full column-level definitions, types, and keys are in **[`docs/CryptoLens_Data_D
 - **Serverless-compatible code** — no RDD APIs (including `DataFrame.isEmpty()`, which wraps `.rdd` internally); emptiness checks use `limit(1).count()`.
 - **Audit logging** — every file/batch processed, across both Full and Incremental loads and both layers, writes a row to `pipeline_execution_logs`.
 
+**Phase 3 additions**
+- **Pipeline integration** — a Databricks Job, `cryptolens_daily`, runs `01.2_bronze_ingest` → `02_silver_transform` → `03_gold_transform` as three dependent serverless tasks, so Gold refreshes automatically after Silver (a repeat run leaves every Gold row count unchanged: idempotent `MERGE`).
+- **Safe arithmetic** — ratios in Gold (`vwap`, returns, range %) use `try_divide`, because zero-volume days otherwise raise `DIVIDE_BY_ZERO` under ANSI mode.
+- **Timestamp-unit drift handled in Gold** — see *Known limitations*.
+- **Parameterised Job** — Job parameters map to the existing widgets (`load_type`, `interval`, `year`, `month`, `day`), so no notebook is edited by hand to run a different batch.
+
 Full writeup: **[`docs/Phase2_CryptoLens.pdf`](docs/Phase2_CryptoLens.pdf)** (includes a log of issues hit on Serverless and how each was resolved).
+
+---
+
+## ⚠️ Known Limitations
+
+- **Timestamp unit drift (found in Phase 3).** The raw schema assumes `open_time` / `close_time` are epoch **milliseconds**, but Binance's 2026 files use **microseconds**. The values still parse as `LongType`, so nothing is quarantined, but Silver's `/ 1000` conversion yields dates around the year 58,000. Gold corrects this when it reads Silver (divides by 1000 again for any timestamp beyond year 2200); the proper fix is to detect the unit in Silver by the raw value's magnitude. Until then, **query Gold, not `silver_klines`, for dates**.
+- **Gap between loads.** The data covers 1–31 August 2026 plus 25 September 2026, so Gold's row-based windows treat 25 September as the day after 31 August. Moving averages and correlations on that date are computed across the gap.
+- **Short history.** Moving-average windows are 5 / 20 days (not 50 / 200) and the correlation window is 14 days, because only about a month is loaded. They are configurable in the notebook's config cell.
+- **One `exchangeInfo` snapshot.** `dim_symbol` status-change tracking is built, but with a single snapshot every `status_changed_date` equals the snapshot date.
+- **Per-symbol loop.** Bronze and Silver process one symbol at a time (see FinOps).
 
 ---
 
@@ -122,20 +162,18 @@ Full writeup: **[`docs/Phase2_CryptoLens.pdf`](docs/Phase2_CryptoLens.pdf)** (in
 
 ---
 
-## 📊 Dashboard (Power BI) — Phase 3
+## 📊 Dashboard (Power BI)
 
-**Business questions to answer:**
-- How has each tracked asset's price and volatility trended over time?
-- Which assets show a bullish (golden cross) or bearish (death cross) signal right now?
-- How correlated are these assets, and is that correlation rising or falling?
-- Which symbols have changed trading status (new listings, halts, delistings) recently?
+The report (`dashboards/CryptoLens_Dashboard.pbix`) connects to the `workspace.gold` schema (plus `pipeline_execution_logs`) through the Power BI **Databricks connector** and a Serverless SQL warehouse, in **Import** mode. The model mirrors the star schema: every fact table is many-to-one to `dim_symbol` and `dim_date`; the audit table stands alone.
 
-**Planned visuals:**
-- Price & volatility trend (line + shaded area, filterable by symbol)
-- Moving-average crossover chart with flagged reversal points
-- Rolling correlation heatmap (top 10–15 symbols by volume, for readability)
-- `dim_symbol` status table — current + recently changed trading pairs
-- *(Stretch)* KPI cards: 24h volume, 24h % change, trade count
+| Page | Visuals | Business question answered |
+|---|---|---|
+| **Price & Volatility** | Coin slicer; close-price line; annualised-volatility line; KPI cards (total trades, USDT volume) | How have price and volatility trended per asset? |
+| **Signals & Status** | Price with short / long moving averages; golden / death crosses per day; current bullish vs bearish split (all symbols); Binance USDT pairs by trading status | Which assets are bullish or bearish? Which pairs have which trading status? |
+| **Correlation** | Rolling-correlation heatmap (top 15 symbols by volume, colour scale −1 to 1); average correlation over time | How correlated are the assets, and is it rising or falling? |
+| **Pipeline Audit** | Log-entry and failure counts; rows inserted / updated by layer; average step duration by layer; activity over time; error log | Is the pipeline healthy, and what did each layer do? |
+
+**Reading the charts:** the loaded data covers August 2026 (full load) plus 25 September 2026 (incremental load), so trend lines are drawn only over August, and values on 25 September follow a gap in the data (see *Known limitations*).
 
 ---
 
@@ -145,7 +183,10 @@ Full writeup: **[`docs/Phase2_CryptoLens.pdf`](docs/Phase2_CryptoLens.pdf)** (in
 - **Download cost:** the heavy top-50 symbol download runs locally (not on billed Databricks compute); only the already-verified CSVs are uploaded into the Unity Catalog Volume.
 - Scope is fixed at the top 50 USDT pairs × 1-minute interval for the semester, sized to comfortably clear reviewer-set thresholds (~200 MB full load, ≥1 MB daily incremental) without ballooning further.
 - `OPTIMIZE` / `Z-ORDER` used sparingly, only on Gold tables (Phase 3).
-- Incremental job scheduled once daily, matching Binance's own publication cadence — no unnecessary cluster spin-ups.
+- Incremental job scheduled once daily (`cryptolens_daily`, 02:00 UTC trigger configured), matching Binance's own publication cadence — no unnecessary cluster spin-ups.
+- **Measured run time** (one daily incremental batch, 50 symbols × 1 day, serverless, Free Edition): Bronze ≈ 5 min 52 s, Silver ≈ 7 min 40 s, Gold ≈ 1 min 8 s — **≈ 14 min 41 s end to end**. Bronze and Silver dominate because they loop over symbols with one `MERGE` per symbol; Gold works on whole tables.
+- **Main optimisation identified:** batch all symbols into a single read and one `MERGE` per layer, which would cut the bulk of the run time (and compute cost on a paid platform) roughly in proportion. Derived Gold tables currently rebuild from the fact table each run, which is fine at this scale but would need to become incremental for an hourly enterprise run.
+- Free Edition has no per-run billing, so cost projections (daily vs hourly, per year) are estimates, set out in the final report.
 - Fallback: Azure for Students credits if more headroom is needed for Phase 3 dashboard testing.
 
 ---
@@ -154,7 +195,7 @@ Full writeup: **[`docs/Phase2_CryptoLens.pdf`](docs/Phase2_CryptoLens.pdf)** (in
 
 - [x] **Phase 1** — Proposal, real checksum-verified sample data, architecture design, network-workaround documented *(26 Sep 2026)*
 - [x] **Phase 2** — Bronze & Silver notebooks implemented: explicit schemas, idempotent MERGE, parameterized backfills, schema-drift quarantine, audit logging *(completed; verified via `00_layers_verification.ipynb`)*
-- [ ] **Phase 3** — Gold layer, Power BI dashboard, final delivery *(due 24 Oct 2026)*
+- [x] **Phase 3** — Gold star schema, Job-based automation, Power BI dashboard, final report *(due 24 Oct 2026)*
 
 ---
 
